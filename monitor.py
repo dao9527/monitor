@@ -12,53 +12,82 @@ BARK_URL = f"https://api.day.app/{BARK_KEY}"
 DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
-async def close_popups(page):
-    """尝试关闭常见的弹窗和遮罩层"""
-    # 常见关闭按钮选择器
+async def close_all_popups(page):
+    """强力关闭所有可能的弹窗和遮罩层"""
+    # 可能出现的弹窗关闭选择器
     close_selectors = [
-        '.el-dialog__close',           # Element UI 弹窗关闭按钮
-        '.el-message-box__close',      # Element UI 消息框关闭
-        '.close',                      # 通用 close 类
+        '.el-dialog__close',
+        '.el-message-box__close',
+        '.el-overlay-dialog .el-icon-close',
         '[aria-label="Close"]',
+        '[aria-label="关闭"]',
+        '.close',
         'button:has-text("确定")',
         'button:has-text("知道了")',
         'button:has-text("关闭")',
+        'button:has-text("接受")',
+        '.agreement-wrapper button',
         '.notice-dialog .close',
-        '.agreement-wrapper button',   # 协议弹窗的按钮
+        '.dialog-footer button',
+        '.el-button:has-text("确定")',
+        '.el-button:has-text("取消")',
     ]
+    closed = False
     for selector in close_selectors:
         try:
             elements = await page.query_selector_all(selector)
             for el in elements:
                 if await el.is_visible():
                     await el.click(timeout=2000)
-                    print(f"[{datetime.now()}] 已关闭弹窗: {selector}")
+                    print(f"[{datetime.now()}] 关闭弹窗: {selector}")
+                    closed = True
                     await page.wait_for_timeout(500)
         except:
             pass
+    return closed
 
 async def fetch_all_inventory():
-    """通过修改 URL 参数翻页抓取全部饰品"""
+    """强化版翻页抓取"""
     print(f"[{datetime.now()}] 启动浏览器...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         all_items = []
         page_num = 1
-        max_pages = 50  # 防止无限循环
+        max_pages = 100  # 加大上限
 
         try:
             while page_num <= max_pages:
                 url = f"{BASE_URL}?page={page_num}"
-                print(f"[{datetime.now()}] 正在抓取第 {page_num} 页: {url}")
+                print(f"[{datetime.now()}] 正在请求第 {page_num} 页: {url}")
                 
                 await page.goto(url, timeout=30000)
-                await page.wait_for_selector('.item-container', timeout=10000)
                 
-                # 尝试关闭可能出现的弹窗
-                await close_popups(page)
+                # 多次尝试关闭弹窗（有些弹窗可能延迟出现）
+                for _ in range(3):
+                    if await close_all_popups(page):
+                        await page.wait_for_timeout(1000)
                 
-                # 提取当前页饰品
+                # 滚动页面以触发懒加载
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1000)
+                await page.evaluate("window.scrollTo(0, 0)")
+                await page.wait_for_timeout(500)
+                
+                # 等待饰品容器出现，延长超时至 20 秒
+                try:
+                    await page.wait_for_selector('.item-container', timeout=20000)
+                except Exception as e:
+                    print(f"[{datetime.now()}] 第 {page_num} 页等待容器超时: {e}")
+                    # 打印当前页面 HTML 前 500 字符用于调试
+                    html = await page.content()
+                    print(f"[DEBUG] 页面片段: {html[:500]}")
+                    break
+                
+                # 再次尝试关闭可能新出现的弹窗
+                await close_all_popups(page)
+                
+                # 提取饰品
                 items = await page.evaluate('''() => {
                     const containers = document.querySelectorAll('.item-container');
                     const result = [];
@@ -74,21 +103,20 @@ async def fetch_all_inventory():
                 print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
                 
                 if len(items) == 0:
-                    print(f"[{datetime.now()}] 第 {page_num} 页没有饰品，可能已到末尾")
+                    print(f"[{datetime.now()}] 第 {page_num} 页无饰品，停止翻页")
                     break
-                    
+                
                 all_items.extend(items)
                 
-                # 检查是否还有下一页（通过判断当前页饰品数量是否小于30，或查看分页器状态）
+                # 判断是否最后一页：如果不足一页（常见为30件），认为结束
                 if len(items) < 30:
-                    # 如果不足一页，说明是最后一页
                     print(f"[{datetime.now()}] 当前页不足30件，视为最后一页")
                     break
-                    
+                
                 page_num += 1
                 
         except Exception as e:
-            print(f"[{datetime.now()}] 抓取过程中出错: {e}")
+            print(f"[{datetime.now()}] 抓取过程中出现异常: {e}")
         finally:
             await browser.close()
             
@@ -171,6 +199,10 @@ def run_daily_report():
 
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        run_daily_report()
+    else:
+        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
