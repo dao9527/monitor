@@ -6,30 +6,59 @@ from playwright.async_api import async_playwright
 import requests
 
 # --- 配置 ---
-URL = "https://m.steamdt.com/inventory/d665bb297e6a858920e00181e5ff327f"
+BASE_URL = "https://m.steamdt.com/inventory/d665bb297e6a858920e00181e5ff327f"
 BARK_KEY = os.environ.get("BARK_KEY")
 BARK_URL = f"https://api.day.app/{BARK_KEY}"
 DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
+async def close_popups(page):
+    """尝试关闭常见的弹窗和遮罩层"""
+    # 常见关闭按钮选择器
+    close_selectors = [
+        '.el-dialog__close',           # Element UI 弹窗关闭按钮
+        '.el-message-box__close',      # Element UI 消息框关闭
+        '.close',                      # 通用 close 类
+        '[aria-label="Close"]',
+        'button:has-text("确定")',
+        'button:has-text("知道了")',
+        'button:has-text("关闭")',
+        '.notice-dialog .close',
+        '.agreement-wrapper button',   # 协议弹窗的按钮
+    ]
+    for selector in close_selectors:
+        try:
+            elements = await page.query_selector_all(selector)
+            for el in elements:
+                if await el.is_visible():
+                    await el.click(timeout=2000)
+                    print(f"[{datetime.now()}] 已关闭弹窗: {selector}")
+                    await page.wait_for_timeout(500)
+        except:
+            pass
+
 async def fetch_all_inventory():
-    """翻页抓取全部饰品"""
+    """通过修改 URL 参数翻页抓取全部饰品"""
     print(f"[{datetime.now()}] 启动浏览器...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         all_items = []
-        
+        page_num = 1
+        max_pages = 50  # 防止无限循环
+
         try:
-            await page.goto(URL, timeout=30000)
-            # 等待第一页饰品加载
-            await page.wait_for_selector('.item-container', timeout=10000)
-            
-            page_num = 1
-            while True:
-                print(f"[{datetime.now()}] 正在抓取第 {page_num} 页...")
+            while page_num <= max_pages:
+                url = f"{BASE_URL}?page={page_num}"
+                print(f"[{datetime.now()}] 正在抓取第 {page_num} 页: {url}")
                 
-                # 提取当前页的饰品
+                await page.goto(url, timeout=30000)
+                await page.wait_for_selector('.item-container', timeout=10000)
+                
+                # 尝试关闭可能出现的弹窗
+                await close_popups(page)
+                
+                # 提取当前页饰品
                 items = await page.evaluate('''() => {
                     const containers = document.querySelectorAll('.item-container');
                     const result = [];
@@ -43,36 +72,21 @@ async def fetch_all_inventory():
                 }''')
                 
                 print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
-                all_items.extend(items)
                 
-                # 查找下一页按钮
-                # 根据常见分页样式调整选择器，常见的有：.pagination .next, button[aria-label="下一页"], li.next a 等
-                next_button = await page.query_selector('button[aria-label="下一页"], .next:not(.disabled), .pagination .next, li.next a')
-                
-                if not next_button:
-                    # 尝试更通用的选择器：包含 "下一页" 文本的元素
-                    next_button = await page.query_selector('text=下一页')
-                
-                if not next_button:
-                    # 也尝试 ">" 或 "›" 符号
-                    next_button = await page.query_selector('a:has-text("›"), button:has-text("›")')
-                
-                if next_button:
-                    # 检查按钮是否可点击（没有被禁用）
-                    is_disabled = await next_button.evaluate('el => el.hasAttribute("disabled") || el.classList.contains("disabled")')
-                    if is_disabled:
-                        print(f"[{datetime.now()}] 已到达最后一页")
-                        break
-                    
-                    # 点击下一页
-                    await next_button.click()
-                    # 等待新页面加载
-                    await page.wait_for_selector('.item-container', timeout=10000)
-                    page_num += 1
-                else:
-                    print(f"[{datetime.now()}] 未找到下一页按钮，抓取结束")
+                if len(items) == 0:
+                    print(f"[{datetime.now()}] 第 {page_num} 页没有饰品，可能已到末尾")
                     break
                     
+                all_items.extend(items)
+                
+                # 检查是否还有下一页（通过判断当前页饰品数量是否小于30，或查看分页器状态）
+                if len(items) < 30:
+                    # 如果不足一页，说明是最后一页
+                    print(f"[{datetime.now()}] 当前页不足30件，视为最后一页")
+                    break
+                    
+                page_num += 1
+                
         except Exception as e:
             print(f"[{datetime.now()}] 抓取过程中出错: {e}")
         finally:
