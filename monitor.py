@@ -13,7 +13,7 @@ DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
 async def fetch_inventory():
-    """超简版提取 - 避免所有语法问题"""
+    """超简版 SteamDT 库存抓取"""
     print(f"[{datetime.now()}] 启动浏览器抓取...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -33,13 +33,12 @@ async def fetch_inventory():
                 if attempt % 8 == 0:
                     print(f"已滚动 {attempt} 次...")
 
-            # 极简 JS：完全不使用正则，只用字符串包含判断
+            # 极简 JS 提取（已彻底修复所有转义问题）
             items = await page.evaluate('''() => {
                 const result = [];
                 const seen = new Set();
-                const allText = document.body.innerText || '';
-                const lines = allText.split('\n');
-
+                const lines = document.body.innerText.split('\n');
+                
                 for (let line of lines) {
                     line = line.trim();
                     if (line.length > 20 && 
@@ -47,14 +46,13 @@ async def fetch_inventory():
                         (line.includes('崭新') || line.includes('磨损') || line.includes('出厂') || line.includes('Factory New'))) {
                         
                         let name = line.replace(/ +/g, ' ').trim();
-                        
-                        // 简单提取数量（找第一个连续数字）
                         let count = 1;
-                        const numStr = line.match(/\d+/);
-                        if (numStr && parseInt(numStr[0]) > 1) {
-                            count = parseInt(numStr[0]);
+                        const nums = line.match(/\\d+/g);
+                        if (nums && nums.length > 0) {
+                            const n = parseInt(nums[0]);
+                            if (n > 1) count = n;
                         }
-
+                        
                         if (!seen.has(name)) {
                             seen.add(name);
                             result.push({name: name, count: count});
@@ -65,12 +63,14 @@ async def fetch_inventory():
             }''')
             
             print(f"[{datetime.now()}] 最终抓取到 {len(items)} 件库存饰品")
-            if items && items.length > 0:
+            
+            # Python 打印前6个示例
+            if items and len(items) > 0:
                 print("前 6 个示例：")
-                for item in items.slice(0, 6):
-                    print("   • " + item.name + " × " + item.count)
+                for item in items[:6]:
+                    print(f"   • {item['name']} × {item['count']}")
             else:
-                print("未抓取到饰品，请查看 error_page.html")
+                print("未抓取到饰品")
             
             return items
 
@@ -80,14 +80,14 @@ async def fetch_inventory():
                 await page.screenshot(path="error_screenshot.png")
                 with open("error_page.html", "w", encoding="utf-8") as f:
                     f.write(await page.content())
-                print("✅ 已保存 error_screenshot.png 和 error_page.html，请下载查看页面实际内容")
+                print("✅ 已保存 error_screenshot.png 和 error_page.html，请下载查看")
             except:
                 pass
             return None
         finally:
             await browser.close()
 
-# ==================== 以下保持不变 ====================
+# ==================== 以下部分无需修改 ====================
 def load_json(file_path):
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -166,6 +166,10 @@ def run_daily_report():
 
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        run_daily_report()
+    else:
+        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
