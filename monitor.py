@@ -13,7 +13,7 @@ DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
 async def fetch_inventory():
-    """极简可靠版提取 SteamDT 库存"""
+    """超简版提取 - 避免所有语法问题"""
     print(f"[{datetime.now()}] 启动浏览器抓取...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -27,36 +27,32 @@ async def fetch_inventory():
 
             print("开始滚动加载所有饰品...")
 
-            # 滚动加载
             for attempt in range(35):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(1.5)
                 if attempt % 8 == 0:
                     print(f"已滚动 {attempt} 次...")
 
-            # 极简 JS - 避免任何语法问题
+            # 极简 JS：完全不使用正则，只用字符串包含判断
             items = await page.evaluate('''() => {
                 const result = [];
-                const allText = document.body.innerText;
-
-                // 按行分割，查找包含 | 和 (崭新出厂) 的典型饰品行
-                const lines = allText.split('\n');
                 const seen = new Set();
+                const allText = document.body.innerText || '';
+                const lines = allText.split('\n');
 
                 for (let line of lines) {
                     line = line.trim();
-                    if (line.length > 15 && 
+                    if (line.length > 20 && 
                         line.includes('|') && 
-                        (line.includes('崭新') || line.includes('磨损') || line.includes('出厂'))) {
+                        (line.includes('崭新') || line.includes('磨损') || line.includes('出厂') || line.includes('Factory New'))) {
                         
-                        // 清理多余空格
-                        let name = line.replace(/\\s+/g, ' ').trim();
+                        let name = line.replace(/ +/g, ' ').trim();
                         
-                        // 提取数量（如果有数字在附近）
+                        // 简单提取数量（找第一个连续数字）
                         let count = 1;
-                        const numMatch = line.match(/(\\d{1,3})/);
-                        if (numMatch && parseInt(numMatch[1]) > 1) {
-                            count = parseInt(numMatch[1]);
+                        const numStr = line.match(/\d+/);
+                        if (numStr && parseInt(numStr[0]) > 1) {
+                            count = parseInt(numStr[0]);
                         }
 
                         if (!seen.has(name)) {
@@ -69,10 +65,12 @@ async def fetch_inventory():
             }''')
             
             print(f"[{datetime.now()}] 最终抓取到 {len(items)} 件库存饰品")
-            if items and len(items) > 0:
+            if items && items.length > 0:
                 print("前 6 个示例：")
-                for item in items[:6]:
-                    print(f"   • {item['name']} × {item['count']}")
+                for item in items.slice(0, 6):
+                    print("   • " + item.name + " × " + item.count)
+            else:
+                print("未抓取到饰品，请查看 error_page.html")
             
             return items
 
@@ -82,7 +80,7 @@ async def fetch_inventory():
                 await page.screenshot(path="error_screenshot.png")
                 with open("error_page.html", "w", encoding="utf-8") as f:
                     f.write(await page.content())
-                print("✅ 已保存 error_screenshot.png 和 error_page.html，请下载查看")
+                print("✅ 已保存 error_screenshot.png 和 error_page.html，请下载查看页面实际内容")
             except:
                 pass
             return None
@@ -152,7 +150,6 @@ def run_monitor():
         for c in changes:
             log.append(f"[{timestamp}] {c}")
         save_json(CHANGES_LOG_FILE, log[-100:])
-        # 实时推送变动
         send_bark("🔔 SteamDT 库存变动提醒", "\n".join(changes[:8]))
     else:
         print("无变动")
