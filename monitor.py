@@ -6,160 +6,115 @@ from playwright.async_api import async_playwright
 import requests
 
 # --- 配置 ---
-BASE_URL = "https://m.steamdt.com/inventory/d665bb297e6a858920e00181e5ff327f"
+URL = "https://m.steamdt.com/inventory/d665bb297e6a858920e00181e5ff327f"
 BARK_KEY = os.environ.get("BARK_KEY")
 BARK_URL = f"https://api.day.app/{BARK_KEY}"
 DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
-async def close_all_popups(page):
-    """关闭所有可能的弹窗"""
-    selectors = [
-        '.el-dialog__close', '[aria-label="Close"]', '[aria-label="关闭"]',
-        '.close', 'button:has-text("确定")', 'button:has-text("知道了")',
-        'button:has-text("关闭")', '.agreement-wrapper button', '.notice-dialog .close'
-    ]
-    for sel in selectors:
-        try:
-            for el in await page.query_selector_all(sel):
-                if await el.is_visible():
-                    await el.click(timeout=2000)
-                    await page.wait_for_timeout(500)
-        except:
-            pass
-
-async def get_max_page(page):
-    """从分页组件提取最大页码，如果提取失败返回None"""
-    # 常见分页总页数选择器
-    selectors = [
-        '.el-pagination__total',           # Element UI 总页数
-        '.pagination .total',              # 通用
-        'span:has-text("共")',             # 包含“共”的 span
-        'li:last-child span',              # 最后一页的数字
-    ]
-    for sel in selectors:
-        try:
-            el = await page.query_selector(sel)
-            if el:
-                text = await el.inner_text()
-                # 尝试用正则提取数字，例如“共 9 页”或“1/9”
-                import re
-                # 匹配类似 "共 9 页" 或 "1/9" 中的数字9
-                match = re.search(r'(\d+)\s*页', text)
-                if match:
-                    return int(match.group(1))
-                match = re.search(r'/(\d+)', text)
-                if match:
-                    return int(match.group(1))
-                # 直接尝试转为数字
-                nums = re.findall(r'\d+', text)
-                if nums:
-                    return int(nums[-1])  # 取最后一个数字
-        except:
-            pass
-    return None
-
-async def fetch_all_inventory():
-    print(f"[{datetime.now()}] 启动浏览器...")
+async def fetch_inventory():
+    """使用 Playwright 渲染 + 滚动加载所有饰品"""
+    print(f"[{datetime.now()}] 启动浏览器抓取...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        all_items = []
-        page_num = 1
-        max_pages = None  # 稍后从页面获取
-
+        page = await browser.new_page(
+            user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+        )
         try:
-            while True:
-                url = f"{BASE_URL}?page={page_num}"
-                print(f"[{datetime.now()}] 正在请求第 {page_num} 页: {url}")
+            await page.goto(URL, timeout=60000)
+            
+            # 等待页面基本框架加载
+            await page.wait_for_load_state("networkidle", timeout=30000)
+            await asyncio.sleep(3)  # 额外等待 JS 渲染
 
-                await page.goto(url, timeout=30000)
-                await page.wait_for_load_state('networkidle', timeout=15000)
-                await close_all_popups(page)
+            print("开始滚动加载所有物品...")
+
+            # 无限滚动加载直到没有新内容
+            last_height = await page.evaluate("document.body.scrollHeight")
+            item_count = 0
+            max_scroll_attempts = 30  # 防止无限循环
+
+            for attempt in range(max_scroll_attempts):
+                # 滚动到底部
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(800)
+                await asyncio.sleep(2)  # 等待加载
 
-                # 如果是第一页，尝试获取总页数
-                if page_num == 1:
-                    max_pages = await get_max_page(page)
-                    if max_pages:
-                        print(f"[{datetime.now()}] 检测到总页数为: {max_pages}")
-
-                # 等待饰品容器
-                items = []
-                for retry in range(2):
-                    try:
-                        await page.wait_for_function(
-                            'document.querySelectorAll(".item-container").length > 0',
-                            timeout=25000
-                        )
-                    except:
-                        if retry == 0:
-                            print(f"[{datetime.now()}] 第 {page_num} 页加载超时，刷新重试...")
-                            await page.reload(timeout=30000)
-                            await page.wait_for_load_state('networkidle', timeout=15000)
-                            await close_all_popups(page)
-                            continue
-                        else:
-                            print(f"[{datetime.now()}] 第 {page_num} 页最终无数据，停止翻页")
-                            break
-
-                    items = await page.evaluate('''() => {
-                        const containers = document.querySelectorAll('.item-container');
-                        return Array.from(containers).map(el => {
-                            let name = 'Unknown Item';
-                            const img = el.querySelector('img');
-                            if (img && img.getAttribute('alt')) {
-                                name = img.getAttribute('alt').trim();
-                            } else {
-                                const nameEl = el.querySelector('.name, .item-name, [class*="name"]');
-                                if (nameEl) name = nameEl.innerText.trim();
-                                else if (img && img.getAttribute('title')) name = img.getAttribute('title').trim();
-                            }
-                            return { name, count: 1 };
-                        });
-                    }''')
+                # 检查新高度
+                new_height = await page.evaluate("document.body.scrollHeight")
+                current_items = await page.evaluate("""() => document.querySelectorAll('div[class*="item"], div[class*="skin"], img').length""")
+                
+                if new_height == last_height and current_items > item_count:
+                    print(f"已加载完成，共 {current_items} 件饰品")
                     break
+                
+                last_height = new_height
+                item_count = current_items
+                print(f"第 {attempt+1} 次滚动，已加载 {item_count} 件...")
 
-                if len(items) == 0:
-                    break
-
-                print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
-                all_items.extend(items)
-
-                # 终止条件判断
-                if max_pages and page_num >= max_pages:
-                    print(f"[{datetime.now()}] 已达到最大页码 {max_pages}，停止翻页")
-                    break
-
-                # 如果当前页不足30件，也认为结束（兜底）
-                if len(items) < 30:
-                    print(f"[{datetime.now()}] 当前页不足30件，视为最后一页")
-                    break
-
-                page_num += 1
-
-                # 安全上限（防止意外无限循环）
-                if page_num > 50:
-                    print(f"[{datetime.now()}] 超过安全上限50页，强制停止")
-                    break
+            # 提取物品数据（根据实际页面结构调整）
+            items = await page.evaluate('''() => {
+                const result = [];
+                // 常见可能的容器选择器，优先匹配含图片或名称的元素
+                const containers = document.querySelectorAll('div[class*="item"], div[class*="skin"], div[class*="inventory"], li');
+                
+                containers.forEach(el => {
+                    const img = el.querySelector('img');
+                    const nameEl = el.querySelector('span, div[class*="name"], p, [class*="text"]');
+                    let name = 'Unknown';
+                    if (nameEl) {
+                        name = nameEl.textContent.trim();
+                    } else if (img) {
+                        name = img.getAttribute('alt') || img.getAttribute('title') || 'Unknown Item';
+                    }
+                    
+                    // 尝试提取数量（常见 class 如 count, num, amount）
+                    let count = 1;
+                    const countEl = el.querySelector('[class*="count"], [class*="num"], [class*="amount"], .badge, span');
+                    if (countEl) {
+                        const countText = countEl.textContent.trim();
+                        const numMatch = countText.match(/\\d+/);
+                        if (numMatch) count = parseInt(numMatch[0]);
+                    }
+                    
+                    if (name && name.length > 2 && !name.includes('加载')) {
+                        result.push({ name: name.trim(), count: count });
+                    }
+                });
+                return result;
+            }''')
+            
+            # 去重（按名称）
+            unique_items = {}
+            for item in items:
+                key = item['name']
+                if key in unique_items:
+                    unique_items[key]['count'] += item['count']
+                else:
+                    unique_items[key] = item
+            final_items = list(unique_items.values())
+            
+            print(f"[{datetime.now()}] 最终抓取到 {len(final_items)} 件唯一饰品")
+            return final_items
 
         except Exception as e:
-            print(f"[{datetime.now()}] 抓取异常: {e}")
+            print(f"[{datetime.now()}] 抓取失败: {e}")
+            # 调试：保存页面截图和HTML（GitHub Actions 日志可见）
+            await page.screenshot(path="error_screenshot.png")
+            with open("error_page.html", "w", encoding="utf-8") as f:
+                f.write(await page.content())
+            return None
         finally:
             await browser.close()
 
-        print(f"[{datetime.now()}] 全部抓取完成，共 {len(all_items)} 件饰品")
-        return all_items
-
-def load_json(path):
-    if os.path.exists(path):
-        with open(path, 'r', encoding='utf-8') as f:
+# 其余函数（load_json, save_json, compare_data, send_bark, run_monitor, run_daily_report）保持原样不变
+def load_json(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return None
 
-def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f:
+def save_json(file_path, data):
+    with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def compare_data(old, new):
@@ -180,18 +135,18 @@ def compare_data(old, new):
 
 def send_bark(title, body):
     if not BARK_KEY:
+        print("未配置 BARK_KEY，跳过通知")
         return
     try:
-        requests.post(BARK_URL, data={"title": title, "body": body, "group": "SteamDT监控", "sound": "birdsong"}, timeout=10)
+        requests.post(BARK_URL, json={"title": title, "body": body, "group": "SteamDT监控", "sound": "birdsong"}, timeout=10)
         print(f"[{datetime.now()}] Bark 通知已发送")
     except Exception as e:
         print(f"[{datetime.now()}] Bark 发送失败: {e}")
 
 def run_monitor():
     print(f"\n--- 监控任务 {datetime.now()} ---")
-    current = asyncio.run(fetch_all_inventory())
+    current = asyncio.run(fetch_inventory())
     if not current:
-        print("抓取失败，本次监控终止")
         return
     previous = load_json(DATA_FILE)
     if previous is None:
@@ -214,13 +169,15 @@ def run_daily_report():
     print(f"\n--- 每日报告 {datetime.now()} ---")
     log = load_json(CHANGES_LOG_FILE) or []
     date_str = datetime.now().strftime("%Y年%m月%d日")
-    body = f"截止 {date_str} 12:00，库存无变动。" if not log else f"【{date_str} 库存变动汇总】\n\n" + "\n".join(log)
+    if not log:
+        body = f"截止 {date_str} 12:00，库存无变动。"
+    else:
+        body = f"【{date_str} 库存变动汇总】\n\n" + "\n".join(log[-50:])  # 只取最近50条避免太长
     send_bark(f"📦 每日库存报告 ({date_str})", body)
-    save_json(CHANGES_LOG_FILE, [])
+    save_json(CHANGES_LOG_FILE, [])  # 清空
 
 if __name__ == "__main__":
     import sys
-    # 确保只执行一次监控
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
