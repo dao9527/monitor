@@ -13,48 +13,56 @@ DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
 async def close_all_popups(page):
-    """强力关闭所有可能的弹窗和遮罩层"""
-    close_selectors = [
-        '.el-dialog__close',
-        '.el-message-box__close',
-        '.el-overlay-dialog .el-icon-close',
-        '[aria-label="Close"]',
-        '[aria-label="关闭"]',
-        '.close',
-        'button:has-text("确定")',
-        'button:has-text("知道了")',
-        'button:has-text("关闭")',
-        'button:has-text("接受")',
-        '.agreement-wrapper button',
-        '.notice-dialog .close',
-        '.dialog-footer button',
-        '.el-button:has-text("确定")',
-        '.el-button:has-text("取消")',
+    """关闭所有可能的弹窗"""
+    selectors = [
+        '.el-dialog__close', '[aria-label="Close"]', '[aria-label="关闭"]',
+        '.close', 'button:has-text("确定")', 'button:has-text("知道了")',
+        'button:has-text("关闭")', '.agreement-wrapper button', '.notice-dialog .close'
     ]
-    closed = False
-    for selector in close_selectors:
+    for sel in selectors:
         try:
-            elements = await page.query_selector_all(selector)
-            for el in elements:
+            for el in await page.query_selector_all(sel):
                 if await el.is_visible():
                     await el.click(timeout=2000)
-                    print(f"[{datetime.now()}] 关闭弹窗: {selector}")
-                    closed = True
                     await page.wait_for_timeout(500)
         except:
             pass
-    return closed
+
+async def is_last_page_by_pagination(page):
+    """通过分页组件判断是否为最后一页（返回True表示无下一页）"""
+    # 常见分页选择器
+    next_selectors = [
+        'button:has-text("下一页")',
+        'a:has-text("下一页")',
+        '.el-pagination .btn-next',
+        '.pagination .next',
+        'li.next a',
+        '[aria-label="下一页"]',
+        '.next:not(.disabled)'
+    ]
+    for sel in next_selectors:
+        try:
+            next_btn = await page.query_selector(sel)
+            if next_btn:
+                # 检查是否禁用
+                is_disabled = await next_btn.evaluate(
+                    'el => el.hasAttribute("disabled") || el.classList.contains("disabled") || el.getAttribute("aria-disabled") === "true"'
+                )
+                if not is_disabled:
+                    return False  # 存在可用下一页
+        except:
+            pass
+    return True  # 找不到可用下一页，视为最后一页
 
 async def fetch_all_inventory():
-    """翻页抓取，增加重复检测和多源名称提取"""
     print(f"[{datetime.now()}] 启动浏览器...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         all_items = []
-        previous_page_items = None
+        previous_items = None
         page_num = 1
-        max_pages = 100
+        max_pages = 30  # 安全上限
 
         try:
             while page_num <= max_pages:
@@ -63,86 +71,71 @@ async def fetch_all_inventory():
 
                 await page.goto(url, timeout=30000)
                 await page.wait_for_load_state('networkidle', timeout=15000)
-
-                # 多次尝试关闭弹窗
-                for _ in range(3):
-                    if await close_all_popups(page):
-                        await page.wait_for_timeout(1000)
-
-                # 滚动触发懒加载
+                await close_all_popups(page)
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1000)
-                await page.evaluate("window.scrollTo(0, 0)")
+                await page.wait_for_timeout(800)
 
-                # 等待饰品容器
+                # 等待饰品容器出现（最多25秒）
                 items = []
-                retry_count = 0
-                while retry_count < 2 and len(items) == 0:
+                for retry in range(2):
                     try:
                         await page.wait_for_function(
                             'document.querySelectorAll(".item-container").length > 0',
-                            timeout=30000
+                            timeout=25000
                         )
-                    except Exception as e:
-                        print(f"[{datetime.now()}] 第 {page_num} 页等待容器超时，重试 {retry_count+1}/2")
-                        retry_count += 1
-                        if retry_count < 2:
+                    except:
+                        if retry == 0:
+                            print(f"[{datetime.now()}] 第 {page_num} 页加载超时，刷新重试...")
                             await page.reload(timeout=30000)
                             await page.wait_for_load_state('networkidle', timeout=15000)
                             await close_all_popups(page)
                             continue
                         else:
+                            print(f"[{datetime.now()}] 第 {page_num} 页最终无数据，停止翻页")
                             break
 
                     items = await page.evaluate('''() => {
                         const containers = document.querySelectorAll('.item-container');
-                        const result = [];
-                        containers.forEach(el => {
+                        return Array.from(containers).map(el => {
                             let name = 'Unknown Item';
                             const img = el.querySelector('img');
                             if (img && img.getAttribute('alt')) {
                                 name = img.getAttribute('alt').trim();
                             } else {
-                                const nameEl = el.querySelector('.name, .item-name, .skin-name, [class*="name"]');
-                                if (nameEl) {
-                                    name = nameEl.innerText.trim();
-                                } else {
-                                    if (img && img.getAttribute('title')) {
-                                        name = img.getAttribute('title').trim();
-                                    }
-                                }
+                                const nameEl = el.querySelector('.name, .item-name, [class*="name"]');
+                                if (nameEl) name = nameEl.innerText.trim();
+                                else if (img && img.getAttribute('title')) name = img.getAttribute('title').trim();
                             }
-                            let count = 1;
-                            result.push({ name: name, count: count });
+                            return { name, count: 1 };
                         });
-                        return result;
                     }''')
-
-                    if len(items) == 0:
-                        retry_count += 1
-                        if retry_count < 2:
-                            print(f"[{datetime.now()}] 第 {page_num} 页提取为0，重试...")
-                            await page.reload(timeout=30000)
-                            await page.wait_for_load_state('networkidle', timeout=15000)
-                            await close_all_popups(page)
+                    break
 
                 if len(items) == 0:
-                    print(f"[{datetime.now()}] 第 {page_num} 页最终无饰品，停止翻页")
                     break
 
                 print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
 
-                # 重复内容检测
-                if previous_page_items is not None:
-                    prev_set = {(item['name'], item['count']) for item in previous_page_items}
-                    curr_set = {(item['name'], item['count']) for item in items}
-                    if prev_set == curr_set:
-                        print(f"[{datetime.now()}] 第 {page_num} 页内容与上一页完全相同，判定为重复，停止翻页")
+                # --- 智能终止条件 ---
+                # 1. 优先使用分页器状态判断
+                if page_num > 1 and await is_last_page_by_pagination(page):
+                    print(f"[{datetime.now()}] 分页器显示无下一页，停止翻页")
+                    all_items.extend(items)
+                    break
+
+                # 2. 如果当前页数据与上一页完全相同，且数据量小于30，视为重复结尾
+                if previous_items is not None:
+                    prev_set = {(i['name'], i['count']) for i in previous_items}
+                    curr_set = {(i['name'], i['count']) for i in items}
+                    if prev_set == curr_set and len(items) < 30:
+                        print(f"[{datetime.now()}] 当前页数据与上一页相同且不足30件，停止翻页")
+                        # 不再添加重复数据
                         break
 
                 all_items.extend(items)
-                previous_page_items = items
+                previous_items = items
 
+                # 如果本页不足30件，大概率是最后一页
                 if len(items) < 30:
                     print(f"[{datetime.now()}] 当前页不足30件，视为最后一页")
                     break
@@ -150,30 +143,28 @@ async def fetch_all_inventory():
                 page_num += 1
 
         except Exception as e:
-            print(f"[{datetime.now()}] 抓取过程中出现异常: {e}")
+            print(f"[{datetime.now()}] 抓取异常: {e}")
         finally:
             await browser.close()
 
         print(f"[{datetime.now()}] 全部抓取完成，共 {len(all_items)} 件饰品")
         return all_items
 
-def load_json(file_path):
-    if os.path.exists(file_path):
-        with open(file_path, 'r', encoding='utf-8') as f:
+def load_json(path):
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return None
 
-def save_json(file_path, data):
-    with open(file_path, 'w', encoding='utf-8') as f:
+def save_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def compare_data(old, new):
     changes = []
-    if not old:
-        return changes
+    if not old: return changes
     old_dict = {i['name']: i['count'] for i in old}
     new_dict = {i['name']: i['count'] for i in new}
-
     for name, cnt in new_dict.items():
         if name not in old_dict:
             changes.append(f"➕ 新增: {name} (数量: {cnt})")
@@ -185,9 +176,7 @@ def compare_data(old, new):
     return changes
 
 def send_bark(title, body):
-    if not BARK_KEY:
-        print("未配置 BARK_KEY，跳过通知")
-        return
+    if not BARK_KEY: return
     try:
         requests.post(BARK_URL, data={"title": title, "body": body, "group": "SteamDT监控", "sound": "birdsong"}, timeout=10)
         print(f"[{datetime.now()}] Bark 通知已发送")
@@ -197,16 +186,14 @@ def send_bark(title, body):
 def run_monitor():
     print(f"\n--- 监控任务 {datetime.now()} ---")
     current = asyncio.run(fetch_all_inventory())
-    if not current or len(current) == 0:
-        print("抓取失败或返回0件，本次监控终止")
+    if not current:
+        print("抓取失败，终止")
         return
-
     previous = load_json(DATA_FILE)
     if previous is None:
         save_json(DATA_FILE, current)
         print("首次运行，已保存基准数据")
         return
-
     changes = compare_data(previous, current)
     if changes:
         print(f"检测到 {len(changes)} 项变动")
@@ -217,17 +204,13 @@ def run_monitor():
         save_json(CHANGES_LOG_FILE, log)
     else:
         print("无变动")
-
     save_json(DATA_FILE, current)
 
 def run_daily_report():
     print(f"\n--- 每日报告 {datetime.now()} ---")
     log = load_json(CHANGES_LOG_FILE) or []
     date_str = datetime.now().strftime("%Y年%m月%d日")
-    if not log:
-        body = f"截止 {date_str} 12:00，库存无变动。"
-    else:
-        body = f"【{date_str} 库存变动汇总】\n\n" + "\n".join(log)
+    body = f"截止 {date_str} 12:00，库存无变动。" if not log else f"【{date_str} 库存变动汇总】\n\n" + "\n".join(log)
     send_bark(f"📦 每日库存报告 ({date_str})", body)
     save_json(CHANGES_LOG_FILE, [])
 
