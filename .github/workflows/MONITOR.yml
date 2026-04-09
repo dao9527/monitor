@@ -1,12 +1,10 @@
-name: SteamDT 库存监控
+name: Steam 库存监控
 
 on:
   schedule:
-    # 每5分钟运行一次监控任务 (UTC时间)
-    - cron: '*/5 * * * *'
-    # 每天 UTC 04:00 (北京时间 12:00) 运行每日报告
-    - cron: '0 4 * * *'
-  workflow_dispatch:  # 允许手动触发
+    - cron: '*/10 * * * *'       # 每10分钟运行一次监控
+    - cron: '0 4 * * *'          # 每天 UTC 04:00 (北京时间12:00) 发送报告
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -19,11 +17,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: 安装依赖
+      - name: 安装依赖（使用清华源加速）
         run: |
-          pip install -r requirements.txt
-          playwright install chromium --with-deps
+          pip install --upgrade pip
+          pip install -i https://pypi.tuna.tsinghua.edu.cn/simple requests
 
       - name: 运行监控任务（非报告时间）
         if: github.event.schedule != '0 4 * * *'
