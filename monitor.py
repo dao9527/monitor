@@ -145,6 +145,3 @@ if __name__ == "__main__":
         run_daily_report()
     else:
         run_monitor()
-        run_daily_report()
-    else:
-        run_monitor()
