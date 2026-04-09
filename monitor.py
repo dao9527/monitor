@@ -46,7 +46,7 @@ def fetch_steam_inventory():
             key = f"{desc.get('classid')}_{desc.get('instanceid')}"
             desc_map[key] = desc.get("market_hash_name", "Unknown Item")
         
-        # 按名称统计数量
+        # 按名称统计数量（返回字典）
         inventory = {}
         for asset in data.get("assets", []):
             classid = asset.get("classid")
@@ -54,8 +54,6 @@ def fetch_steam_inventory():
             amount = int(asset.get("amount", 1))
             key = f"{classid}_{instanceid}"
             name = desc_map.get(key, "Unknown Item")
-            
-            # 累加数量
             inventory[name] = inventory.get(name, 0) + amount
         
         print(f"[{datetime.now()}] 成功获取到 {len(inventory)} 种饰品，总计 {sum(inventory.values())} 件。")
@@ -147,7 +145,6 @@ if __name__ == "__main__":
         run_daily_report()
     else:
         run_monitor()
-    if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
         run_monitor()
