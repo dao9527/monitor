@@ -14,7 +14,6 @@ CHANGES_LOG_FILE = "changes_log.json"
 
 async def close_all_popups(page):
     """强力关闭所有可能的弹窗和遮罩层"""
-    # 可能出现的弹窗关闭选择器
     close_selectors = [
         '.el-dialog__close',
         '.el-message-box__close',
@@ -47,79 +46,91 @@ async def close_all_popups(page):
     return closed
 
 async def fetch_all_inventory():
-    """强化版翻页抓取"""
+    """强化版翻页抓取，增加重试和网络等待"""
     print(f"[{datetime.now()}] 启动浏览器...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         all_items = []
         page_num = 1
-        max_pages = 100  # 加大上限
+        max_pages = 100
 
         try:
             while page_num <= max_pages:
                 url = f"{BASE_URL}?page={page_num}"
                 print(f"[{datetime.now()}] 正在请求第 {page_num} 页: {url}")
-                
+
                 await page.goto(url, timeout=30000)
-                
-                # 多次尝试关闭弹窗（有些弹窗可能延迟出现）
+                await page.wait_for_load_state('networkidle', timeout=15000)
+
+                # 多次尝试关闭弹窗
                 for _ in range(3):
                     if await close_all_popups(page):
                         await page.wait_for_timeout(1000)
-                
-                # 滚动页面以触发懒加载
+
+                # 滚动触发懒加载
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(1000)
                 await page.evaluate("window.scrollTo(0, 0)")
-                await page.wait_for_timeout(500)
-                
-                # 等待饰品容器出现，延长超时至 20 秒
-                try:
-                    await page.wait_for_selector('.item-container', timeout=20000)
-                except Exception as e:
-                    print(f"[{datetime.now()}] 第 {page_num} 页等待容器超时: {e}")
-                    # 打印当前页面 HTML 前 500 字符用于调试
-                    html = await page.content()
-                    print(f"[DEBUG] 页面片段: {html[:500]}")
-                    break
-                
-                # 再次尝试关闭可能新出现的弹窗
-                await close_all_popups(page)
-                
-                # 提取饰品
-                items = await page.evaluate('''() => {
-                    const containers = document.querySelectorAll('.item-container');
-                    const result = [];
-                    containers.forEach(el => {
-                        const img = el.querySelector('img');
-                        const name = img ? img.getAttribute('alt') : 'Unknown Item';
-                        let count = 1;
-                        result.push({ name: name.trim(), count: count });
-                    });
-                    return result;
-                }''')
-                
-                print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
-                
+
+                # 等待饰品容器出现，最多30秒
+                items = []
+                retry_count = 0
+                while retry_count < 2 and len(items) == 0:
+                    try:
+                        await page.wait_for_function(
+                            'document.querySelectorAll(".item-container").length > 0',
+                            timeout=30000
+                        )
+                    except Exception as e:
+                        print(f"[{datetime.now()}] 第 {page_num} 页等待容器超时，重试 {retry_count+1}/2")
+                        retry_count += 1
+                        if retry_count < 2:
+                            await page.reload(timeout=30000)
+                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            await close_all_popups(page)
+                            continue
+                        else:
+                            print(f"[{datetime.now()}] 重试失败，跳过该页")
+                            break
+
+                    items = await page.evaluate('''() => {
+                        const containers = document.querySelectorAll('.item-container');
+                        const result = [];
+                        containers.forEach(el => {
+                            const img = el.querySelector('img');
+                            const name = img ? img.getAttribute('alt') : 'Unknown Item';
+                            let count = 1;
+                            result.push({ name: name.trim(), count: count });
+                        });
+                        return result;
+                    }''')
+                    if len(items) == 0:
+                        retry_count += 1
+                        if retry_count < 2:
+                            print(f"[{datetime.now()}] 第 {page_num} 页提取为0，重试...")
+                            await page.reload(timeout=30000)
+                            await page.wait_for_load_state('networkidle', timeout=15000)
+                            await close_all_popups(page)
+
                 if len(items) == 0:
-                    print(f"[{datetime.now()}] 第 {page_num} 页无饰品，停止翻页")
+                    print(f"[{datetime.now()}] 第 {page_num} 页最终无饰品，停止翻页")
                     break
-                
+
+                print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
                 all_items.extend(items)
-                
-                # 判断是否最后一页：如果不足一页（常见为30件），认为结束
+
                 if len(items) < 30:
                     print(f"[{datetime.now()}] 当前页不足30件，视为最后一页")
                     break
-                
+
                 page_num += 1
-                
+
         except Exception as e:
             print(f"[{datetime.now()}] 抓取过程中出现异常: {e}")
         finally:
             await browser.close()
-            
+
         print(f"[{datetime.now()}] 全部抓取完成，共 {len(all_items)} 件饰品")
         return all_items
 
@@ -163,8 +174,8 @@ def send_bark(title, body):
 def run_monitor():
     print(f"\n--- 监控任务 {datetime.now()} ---")
     current = asyncio.run(fetch_all_inventory())
-    if not current:
-        print("抓取失败，本次监控终止")
+    if not current or len(current) == 0:
+        print("抓取失败或返回0件，本次监控终止")
         return
     
     previous = load_json(DATA_FILE)
@@ -199,10 +210,6 @@ def run_daily_report():
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "report":
-        run_daily_report()
-    else:
-        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
