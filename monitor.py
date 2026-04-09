@@ -23,26 +23,24 @@ async def fetch_inventory():
         try:
             await page.goto(URL, timeout=60000)
             await page.wait_for_load_state("networkidle", timeout=40000)
-            await asyncio.sleep(5)  # 给 React 更多渲染时间
+            await asyncio.sleep(5)
 
             print("开始滚动加载所有饰品...")
 
-            # 滚动加载完整列表
+            # 滚动加载
             last_height = await page.evaluate("document.body.scrollHeight")
             for attempt in range(30):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(2)
                 new_height = await page.evaluate("document.body.scrollHeight")
-                if new_height == last_height and attempt > 5:
+                if new_height == last_height and attempt > 8:
                     break
                 last_height = new_height
-                print(f"滚动第 {attempt+1} 次...")
 
-            # 核心提取逻辑 - 针对 SteamDT 页面优化
+            # 核心提取 - 针对 SteamDT 真实结构优化
             items = await page.evaluate('''() => {
                 const result = [];
-                // 更精准的选择器，针对包含图片和名称的卡片
-                const containers = document.querySelectorAll('div[class*="item"], div[class*="skin"], div[class*="inventory"], li, a');
+                const containers = document.querySelectorAll('div, li, a');
                 
                 containers.forEach(el => {
                     let name = '';
@@ -50,55 +48,50 @@ async def fetch_inventory():
                     if (img) {
                         name = (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
                     }
-                    if (!name) {
-                        // 提取包含中文 | 或 (崭新出厂) 的文本
-                        const textElements = el.querySelectorAll('span, div, p, strong');
-                        for (const t of textElements) {
-                            const txt = t.textContent.trim();
-                            if (txt.includes('|') || (txt.includes('崭新') || txt.includes('磨损'))) {
+                    if (!name || name.length < 10) {
+                        const texts = Array.from(el.querySelectorAll('span, div, p, strong')).map(t => t.textContent.trim());
+                        for (const txt of texts) {
+                            if (txt.includes('|') && (txt.includes('崭新') || txt.includes('磨损') || txt.includes('出厂'))) {
                                 name = txt;
                                 break;
                             }
                         }
                     }
                     if (!name) {
-                        const fullText = el.textContent.trim();
-                        if (fullText.includes('|') && fullText.length > 10) {
-                            name = fullText.split('\n')[0] || fullText;
+                        const full = el.textContent.trim();
+                        if (full.includes('|') && full.length > 15) {
+                            name = full.split('\n')[0] || full;
                         }
                     }
 
                     // 提取数量
                     let count = 1;
-                    const countText = el.textContent;
-                    const countMatch = countText.match(/(\d+)\s*(?:个|x|×|件)/i) || countText.match(/\bx?(\d{1,4})\b/);
-                    if (countMatch) {
-                        count = parseInt(countMatch[1]);
-                    }
+                    const countMatch = el.textContent.match(/(\\d+)\\s*(?:个|x|×|件|pcs?)/i) || el.textContent.match(/\\b(\\d{1,4})\\b/);
+                    if (countMatch) count = parseInt(countMatch[1]);
 
-                    // 严格过滤：必须是饰品名称格式
-                    if (name && name.length > 8 && 
-                        (name.includes('|') || name.includes('崭新') || name.includes('磨损')) &&
+                    // 严格过滤有效饰品
+                    if (name && name.length > 12 && 
+                        name.includes('|') && 
+                        (name.includes('崭新') || name.includes('磨损') || name.includes('出厂')) &&
                         !name.includes('加载') && 
                         !name.includes('推荐') && 
                         !name.includes('广告') &&
-                        !name.includes('上一页') &&
-                        name.length < 120) {
+                        name.length < 150) {
                         result.push({
-                            name: name.trim().replace(/\s+/g, ' '),
+                            name: name.replace(/\\s+/g, ' ').trim(),
                             count: count
                         });
                     }
                 });
 
-                // 去重 + 数量累加
+                // 去重并累加数量
                 const unique = {};
                 result.forEach(item => {
                     const key = item.name;
                     if (unique[key]) {
                         unique[key].count += item.count;
                     } else {
-                        unique[key] = item;
+                        unique[key] = {...item};
                     }
                 });
 
@@ -106,10 +99,13 @@ async def fetch_inventory():
             }''')
             
             print(f"[{datetime.now()}] 最终成功抓取到 {len(items)} 件库存饰品")
-            if (items.length > 0) {
-                console.log("前 5 个示例：", items.slice(0, 5));
-            }
-            return items;
+            # Python 端打印示例
+            if items and len(items) > 0:
+                print("前 5 个示例：")
+                for item in items[:5]:
+                    print(f"  • {item['name']} × {item['count']}")
+            
+            return items
 
         except Exception as e:
             print(f"[{datetime.now()}] 抓取失败: {e}")
@@ -120,7 +116,7 @@ async def fetch_inventory():
         finally:
             await browser.close()
 
-# ==================== 以下函数无需修改 ====================
+# ==================== 以下部分无需修改 ====================
 def load_json(file_path):
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -152,16 +148,21 @@ def send_bark(title, body):
         print("未配置 BARK_KEY，跳过通知")
         return
     try:
-        requests.post(BARK_URL, json={"title": title, "body": body, "group": "SteamDT监控", "sound": "birdsong"}, timeout=10)
-        print(f"[{datetime.now()}] Bark 通知已发送")
+        requests.post(BARK_URL, json={
+            "title": title, 
+            "body": body, 
+            "group": "SteamDT监控", 
+            "sound": "birdsong"
+        }, timeout=10)
+        print(f"[{datetime.now()}] Bark 通知已发送成功")
     except Exception as e:
         print(f"[{datetime.now()}] Bark 发送失败: {e}")
 
 def run_monitor():
     print(f"\n--- 监控任务 {datetime.now()} ---")
     current = asyncio.run(fetch_inventory())
-    if not current or len(current) < 20:   # 提高阈值，防止抓取不完整时覆盖
-        print("抓取数量过少，跳过本次数据更新")
+    if not current or len(current) < 30:   # 确保抓取足够多才更新
+        print("抓取数量不足，跳过本次更新，避免覆盖正确数据")
         return
     
     previous = load_json(DATA_FILE)
