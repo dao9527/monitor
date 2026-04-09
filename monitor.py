@@ -13,92 +13,109 @@ DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
 async def fetch_inventory():
-    """使用 Playwright 渲染 + 滚动加载所有饰品"""
+    """优化版：精准提取 Steam 饰品名称、数量、价格"""
     print(f"[{datetime.now()}] 启动浏览器抓取...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(
-            user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+            user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
         )
         try:
             await page.goto(URL, timeout=60000)
-            
-            # 等待页面基本框架加载
             await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(3)  # 额外等待 JS 渲染
+            await asyncio.sleep(4)  # 等待 React/Vite 渲染
 
-            print("开始滚动加载所有物品...")
+            print("开始滚动加载完整库存...")
 
-            # 无限滚动加载直到没有新内容
+            # 滚动加载
             last_height = await page.evaluate("document.body.scrollHeight")
-            item_count = 0
-            max_scroll_attempts = 30  # 防止无限循环
-
-            for attempt in range(max_scroll_attempts):
-                # 滚动到底部
+            for attempt in range(25):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(2)  # 等待加载
-
-                # 检查新高度
+                await asyncio.sleep(1.8)
                 new_height = await page.evaluate("document.body.scrollHeight")
-                current_items = await page.evaluate("""() => document.querySelectorAll('div[class*="item"], div[class*="skin"], img').length""")
-                
-                if new_height == last_height and current_items > item_count:
-                    print(f"已加载完成，共 {current_items} 件饰品")
+                if new_height == last_height:
                     break
-                
                 last_height = new_height
-                item_count = current_items
-                print(f"第 {attempt+1} 次滚动，已加载 {item_count} 件...")
 
-            # 提取物品数据（根据实际页面结构调整）
+            # === 核心改进：更精准的选择器 + 提取名称、数量、价格 ===
             items = await page.evaluate('''() => {
                 const result = [];
-                // 常见可能的容器选择器，优先匹配含图片或名称的元素
-                const containers = document.querySelectorAll('div[class*="item"], div[class*="skin"], div[class*="inventory"], li');
+                // 针对 steamdt 常见库存项容器（根据实际页面调整这些选择器）
+                const itemSelectors = [
+                    'div[class*="item"]', 'div[class*="skin"]', 'div[class*="inventory-item"]',
+                    'li[class*="item"]', 'div[role="button"]', 'a[class*="item"]'
+                ];
                 
+                let containers = [];
+                for (const sel of itemSelectors) {
+                    containers = Array.from(document.querySelectorAll(sel));
+                    if (containers.length > 20) break;  // 找到主要容器就停止
+                }
+
                 containers.forEach(el => {
+                    // 提取名称（优先 alt、title、textContent）
+                    let name = '';
                     const img = el.querySelector('img');
-                    const nameEl = el.querySelector('span, div[class*="name"], p, [class*="text"]');
-                    let name = 'Unknown';
-                    if (nameEl) {
-                        name = nameEl.textContent.trim();
-                    } else if (img) {
-                        name = img.getAttribute('alt') || img.getAttribute('title') || 'Unknown Item';
+                    if (img) {
+                        name = img.getAttribute('alt') || img.getAttribute('title') || '';
                     }
-                    
-                    // 尝试提取数量（常见 class 如 count, num, amount）
+                    if (!name) {
+                        const nameEl = el.querySelector('span[class*="name"], div[class*="name"], p, strong, [class*="text"]');
+                        if (nameEl) name = nameEl.textContent.trim();
+                    }
+
+                    // 提取数量
                     let count = 1;
-                    const countEl = el.querySelector('[class*="count"], [class*="num"], [class*="amount"], .badge, span');
+                    const countEl = el.querySelector('[class*="count"], [class*="num"], [class*="amount"], [class*="quantity"], .badge');
                     if (countEl) {
-                        const countText = countEl.textContent.trim();
-                        const numMatch = countText.match(/\\d+/);
-                        if (numMatch) count = parseInt(numMatch[0]);
+                        const txt = countEl.textContent.trim();
+                        const match = txt.match(/\\d+/);
+                        if (match) count = parseInt(match[0]);
                     }
-                    
-                    if (name && name.length > 2 && !name.includes('加载')) {
-                        result.push({ name: name.trim(), count: count });
+
+                    // 提取价格（如果有）
+                    let price = '';
+                    const priceEl = el.querySelector('[class*="price"], [class*="value"], [class*="rmb"], [class*="cny"], span[class*="¥"]');
+                    if (priceEl) {
+                        price = priceEl.textContent.trim();
+                    }
+
+                    // 过滤无效项
+                    if (name && name.length > 3 && 
+                        !name.includes('加载') && 
+                        !name.includes('推荐') && 
+                        !name.includes('广告') && 
+                        !/^\d+$/.test(name)) {   // 过滤纯数字
+                        result.push({
+                            name: name.trim(),
+                            count: count,
+                            price: price || 'N/A'
+                        });
                     }
                 });
-                return result;
+
+                // 按名称去重并累加数量
+                const unique = {};
+                result.forEach(item => {
+                    const key = item.name;
+                    if (unique[key]) {
+                        unique[key].count += item.count;
+                    } else {
+                        unique[key] = item;
+                    }
+                });
+
+                return Object.values(unique);
             }''')
             
-            # 去重（按名称）
-            unique_items = {}
-            for item in items:
-                key = item['name']
-                if key in unique_items:
-                    unique_items[key]['count'] += item['count']
-                else:
-                    unique_items[key] = item
-            final_items = list(unique_items.values())
+            print(f"[{datetime.now()}] 最终抓取到 {len(items)} 件库存饰品")
+            if len(items) > 0:
+                print("前3个示例:", items[:3])
             
-            print(f"[{datetime.now()}] 最终抓取到 {len(final_items)} 件唯一饰品")
-            return final_items
+            return items
 
         except Exception as e:
             print(f"[{datetime.now()}] 抓取失败: {e}")
-            # 调试：保存页面截图和HTML（GitHub Actions 日志可见）
             await page.screenshot(path="error_screenshot.png")
             with open("error_page.html", "w", encoding="utf-8") as f:
                 f.write(await page.content())
@@ -106,7 +123,7 @@ async def fetch_inventory():
         finally:
             await browser.close()
 
-# 其余函数（load_json, save_json, compare_data, send_bark, run_monitor, run_daily_report）保持原样不变
+# 以下函数保持不变（load_json, save_json, compare_data, send_bark, run_monitor, run_daily_report）
 def load_json(file_path):
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -146,13 +163,16 @@ def send_bark(title, body):
 def run_monitor():
     print(f"\n--- 监控任务 {datetime.now()} ---")
     current = asyncio.run(fetch_inventory())
-    if not current:
+    if not current or len(current) < 5:  # 防止抓取失败时覆盖数据
+        print("抓取结果异常，跳过本次更新")
         return
+    
     previous = load_json(DATA_FILE)
     if previous is None:
         save_json(DATA_FILE, current)
         print("首次运行，已保存基准数据")
         return
+    
     changes = compare_data(previous, current)
     if changes:
         print(f"检测到 {len(changes)} 项变动")
@@ -160,28 +180,22 @@ def run_monitor():
         timestamp = datetime.now().strftime("%H:%M")
         for c in changes:
             log.append(f"[{timestamp}] {c}")
-        save_json(CHANGES_LOG_FILE, log)
+        save_json(CHANGES_LOG_FILE, log[-100:])  # 限制日志长度
     else:
         print("无变动")
+    
     save_json(DATA_FILE, current)
 
 def run_daily_report():
     print(f"\n--- 每日报告 {datetime.now()} ---")
     log = load_json(CHANGES_LOG_FILE) or []
     date_str = datetime.now().strftime("%Y年%m月%d日")
-    if not log:
-        body = f"截止 {date_str} 12:00，库存无变动。"
-    else:
-        body = f"【{date_str} 库存变动汇总】\n\n" + "\n".join(log[-50:])  # 只取最近50条避免太长
+    body = f"【{date_str} 库存变动汇总】\n\n" + "\n".join(log[-50:]) if log else f"截止 {date_str} 12:00，库存无变动。"
     send_bark(f"📦 每日库存报告 ({date_str})", body)
-    save_json(CHANGES_LOG_FILE, [])  # 清空
+    save_json(CHANGES_LOG_FILE, [])
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "report":
-        run_daily_report()
-    else:
-        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
