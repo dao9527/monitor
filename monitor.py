@@ -46,12 +46,13 @@ async def close_all_popups(page):
     return closed
 
 async def fetch_all_inventory():
-    """强化版翻页抓取，增加重试和网络等待"""
+    """翻页抓取，增加重复检测和多源名称提取"""
     print(f"[{datetime.now()}] 启动浏览器...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         all_items = []
+        previous_page_items = None
         page_num = 1
         max_pages = 100
 
@@ -73,7 +74,7 @@ async def fetch_all_inventory():
                 await page.wait_for_timeout(1000)
                 await page.evaluate("window.scrollTo(0, 0)")
 
-                # 等待饰品容器出现，最多30秒
+                # 等待饰品容器
                 items = []
                 retry_count = 0
                 while retry_count < 2 and len(items) == 0:
@@ -91,20 +92,32 @@ async def fetch_all_inventory():
                             await close_all_popups(page)
                             continue
                         else:
-                            print(f"[{datetime.now()}] 重试失败，跳过该页")
                             break
 
                     items = await page.evaluate('''() => {
                         const containers = document.querySelectorAll('.item-container');
                         const result = [];
                         containers.forEach(el => {
+                            let name = 'Unknown Item';
                             const img = el.querySelector('img');
-                            const name = img ? img.getAttribute('alt') : 'Unknown Item';
+                            if (img && img.getAttribute('alt')) {
+                                name = img.getAttribute('alt').trim();
+                            } else {
+                                const nameEl = el.querySelector('.name, .item-name, .skin-name, [class*="name"]');
+                                if (nameEl) {
+                                    name = nameEl.innerText.trim();
+                                } else {
+                                    if (img && img.getAttribute('title')) {
+                                        name = img.getAttribute('title').trim();
+                                    }
+                                }
+                            }
                             let count = 1;
-                            result.push({ name: name.trim(), count: count });
+                            result.push({ name: name, count: count });
                         });
                         return result;
                     }''')
+
                     if len(items) == 0:
                         retry_count += 1
                         if retry_count < 2:
@@ -118,7 +131,17 @@ async def fetch_all_inventory():
                     break
 
                 print(f"[{datetime.now()}] 第 {page_num} 页抓取到 {len(items)} 件饰品")
+
+                # 重复内容检测
+                if previous_page_items is not None:
+                    prev_set = {(item['name'], item['count']) for item in previous_page_items}
+                    curr_set = {(item['name'], item['count']) for item in items}
+                    if prev_set == curr_set:
+                        print(f"[{datetime.now()}] 第 {page_num} 页内容与上一页完全相同，判定为重复，停止翻页")
+                        break
+
                 all_items.extend(items)
+                previous_page_items = items
 
                 if len(items) < 30:
                     print(f"[{datetime.now()}] 当前页不足30件，视为最后一页")
@@ -150,7 +173,7 @@ def compare_data(old, new):
         return changes
     old_dict = {i['name']: i['count'] for i in old}
     new_dict = {i['name']: i['count'] for i in new}
-    
+
     for name, cnt in new_dict.items():
         if name not in old_dict:
             changes.append(f"➕ 新增: {name} (数量: {cnt})")
@@ -177,13 +200,13 @@ def run_monitor():
     if not current or len(current) == 0:
         print("抓取失败或返回0件，本次监控终止")
         return
-    
+
     previous = load_json(DATA_FILE)
     if previous is None:
         save_json(DATA_FILE, current)
         print("首次运行，已保存基准数据")
         return
-    
+
     changes = compare_data(previous, current)
     if changes:
         print(f"检测到 {len(changes)} 项变动")
@@ -194,7 +217,7 @@ def run_monitor():
         save_json(CHANGES_LOG_FILE, log)
     else:
         print("无变动")
-    
+
     save_json(DATA_FILE, current)
 
 def run_daily_report():
@@ -210,6 +233,10 @@ def run_daily_report():
 
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        run_daily_report()
+    else:
+        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
