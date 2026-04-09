@@ -13,7 +13,7 @@ DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
 async def fetch_inventory():
-    """超简版 SteamDT 库存抓取"""
+    """最终极简版 - 完全避免正则和复杂语法"""
     print(f"[{datetime.now()}] 启动浏览器抓取...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -33,7 +33,7 @@ async def fetch_inventory():
                 if attempt % 8 == 0:
                     print(f"已滚动 {attempt} 次...")
 
-            # 极简 JS 提取（已彻底修复所有转义问题）
+            # 极简 JS：只用 includes 和 split，完全无正则
             items = await page.evaluate('''() => {
                 const result = [];
                 const seen = new Set();
@@ -41,16 +41,31 @@ async def fetch_inventory():
                 
                 for (let line of lines) {
                     line = line.trim();
-                    if (line.length > 20 && 
-                        line.includes('|') && 
-                        (line.includes('崭新') || line.includes('磨损') || line.includes('出厂') || line.includes('Factory New'))) {
+                    if (line.length > 20 && line.includes('|') && 
+                        (line.includes('崭新') || line.includes('磨损') || line.includes('出厂'))) {
                         
-                        let name = line.replace(/ +/g, ' ').trim();
+                        let name = line;
+                        // 简单清理多余空格
+                        while (name.includes('  ')) name = name.replace('  ', ' ');
+                        name = name.trim();
+                        
+                        // 简单找数字
                         let count = 1;
-                        const nums = line.match(/\\d+/g);
-                        if (nums && nums.length > 0) {
-                            const n = parseInt(nums[0]);
-                            if (n > 1) count = n;
+                        let i = 0;
+                        while (i < line.length) {
+                            if (line[i] >= '0' && line[i] <= '9') {
+                                let num = '';
+                                while (i < line.length && line[i] >= '0' && line[i] <= '9') {
+                                    num += line[i];
+                                    i++;
+                                }
+                                if (num.length > 0) {
+                                    let n = parseInt(num);
+                                    if (n > 1) count = n;
+                                    break;
+                                }
+                            }
+                            i++;
                         }
                         
                         if (!seen.has(name)) {
@@ -64,13 +79,12 @@ async def fetch_inventory():
             
             print(f"[{datetime.now()}] 最终抓取到 {len(items)} 件库存饰品")
             
-            # Python 打印前6个示例
             if items and len(items) > 0:
                 print("前 6 个示例：")
                 for item in items[:6]:
                     print(f"   • {item['name']} × {item['count']}")
             else:
-                print("未抓取到饰品")
+                print("未抓取到饰品，请查看 error_page.html")
             
             return items
 
@@ -166,10 +180,6 @@ def run_daily_report():
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "report":
-        run_daily_report()
-    else:
-        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
