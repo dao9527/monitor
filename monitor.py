@@ -36,7 +36,7 @@ async def fetch_inventory():
                     break
                 last_height = new_height
 
-            # 修复版 JS 代码（转义已处理）
+            # 干净的 JS 提取逻辑
             items = await page.evaluate('''() => {
                 const result = [];
                 const containers = document.querySelectorAll('div, li, a');
@@ -48,7 +48,7 @@ async def fetch_inventory():
                         name = (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
                     }
                     if (!name || name.length < 10) {
-                        const texts = Array.from(el.querySelectorAll('span, div, p, strong')).map(t => t.textContent.trim());
+                        const texts = Array.from(el.querySelectorAll('span, div, p, strong, h1, h2, h3')).map(t => t.textContent.trim());
                         for (const txt of texts) {
                             if (txt.includes('|') && (txt.includes('崭新') || txt.includes('磨损') || txt.includes('出厂') || txt.includes('Factory New'))) {
                                 name = txt;
@@ -59,18 +59,18 @@ async def fetch_inventory():
                     if (!name) {
                         const full = el.textContent.trim();
                         if (full.includes('|') && full.length > 15) {
-                            name = full.split('\\n')[0] || full;
+                            name = full.split('\n')[0] || full;
                         }
                     }
 
                     // 提取数量
                     let count = 1;
-                    const text = el.textContent;
-                    let match = text.match(/(\\d+)\\s*(?:个|x|×|件|pcs?)/i);
-                    if (!match) match = text.match(/\\b(\\d{1,4})\\b/);
+                    const text = el.textContent || '';
+                    let match = text.match(/(\d+)\s*(?:个|x|×|件|pcs?)/i);
+                    if (!match) match = text.match(/\b(\d{1,4})\b/);
                     if (match) count = parseInt(match[1]);
 
-                    // 严格过滤
+                    // 严格过滤有效饰品
                     if (name && name.length > 12 && 
                         name.includes('|') && 
                         (name.includes('崭新') || name.includes('磨损') || name.includes('出厂')) &&
@@ -79,13 +79,13 @@ async def fetch_inventory():
                         !name.includes('广告') &&
                         name.length < 150) {
                         result.push({
-                            name: name.replace(/\\s+/g, ' ').trim(),
+                            name: name.replace(/\s+/g, ' ').trim(),
                             count: count
                         });
                     }
                 });
 
-                // 去重累加
+                // 去重并累加数量
                 const unique = {};
                 result.forEach(item => {
                     const key = item.name;
@@ -100,10 +100,14 @@ async def fetch_inventory():
             }''')
             
             print(f"[{datetime.now()}] 最终成功抓取到 {len(items)} 件库存饰品")
+            
+            # Python 端打印前5个示例
             if items and len(items) > 0:
                 print("前 5 个示例：")
-                for item in items.slice(0, 5):
-                    print(`  • ${item.name} × ${item.count}`)
+                for item in items[:5]:
+                    print(f"  • {item['name']} × {item['count']}")
+            else:
+                print("未抓取到任何有效饰品")
             
             return items
 
@@ -120,7 +124,7 @@ async def fetch_inventory():
         finally:
             await browser.close()
 
-# ==================== 以下部分保持不变 ====================
+# ==================== 以下部分无需修改 ====================
 def load_json(file_path):
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -183,6 +187,8 @@ def run_monitor():
         for c in changes:
             log.append(f"[{timestamp}] {c}")
         save_json(CHANGES_LOG_FILE, log[-100:])
+        # 立即推送单条变动通知
+        send_bark("SteamDT 库存变动提醒", "\n".join(changes[:10]))
     else:
         print("无变动")
     
@@ -198,6 +204,10 @@ def run_daily_report():
 
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        run_daily_report()
+    else:
+        run_monitor()
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         run_daily_report()
     else:
