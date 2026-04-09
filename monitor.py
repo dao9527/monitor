@@ -13,7 +13,7 @@ DATA_FILE = "inventory_data.json"
 CHANGES_LOG_FILE = "changes_log.json"
 
 async def fetch_inventory():
-    """优化版：精准提取 Steam 饰品名称、数量、价格"""
+    """精准抓取 SteamDT 库存：只提取饰品种类名称 + 数量"""
     print(f"[{datetime.now()}] 启动浏览器抓取...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -22,79 +22,76 @@ async def fetch_inventory():
         )
         try:
             await page.goto(URL, timeout=60000)
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(4)  # 等待 React/Vite 渲染
+            await page.wait_for_load_state("networkidle", timeout=40000)
+            await asyncio.sleep(5)  # 给 React 更多渲染时间
 
-            print("开始滚动加载完整库存...")
+            print("开始滚动加载所有饰品...")
 
-            # 滚动加载
+            # 滚动加载完整列表
             last_height = await page.evaluate("document.body.scrollHeight")
-            for attempt in range(25):
+            for attempt in range(30):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(1.8)
+                await asyncio.sleep(2)
                 new_height = await page.evaluate("document.body.scrollHeight")
-                if new_height == last_height:
+                if new_height == last_height and attempt > 5:
                     break
                 last_height = new_height
+                print(f"滚动第 {attempt+1} 次...")
 
-            # === 核心改进：更精准的选择器 + 提取名称、数量、价格 ===
+            # 核心提取逻辑 - 针对 SteamDT 页面优化
             items = await page.evaluate('''() => {
                 const result = [];
-                // 针对 steamdt 常见库存项容器（根据实际页面调整这些选择器）
-                const itemSelectors = [
-                    'div[class*="item"]', 'div[class*="skin"]', 'div[class*="inventory-item"]',
-                    'li[class*="item"]', 'div[role="button"]', 'a[class*="item"]'
-                ];
+                // 更精准的选择器，针对包含图片和名称的卡片
+                const containers = document.querySelectorAll('div[class*="item"], div[class*="skin"], div[class*="inventory"], li, a');
                 
-                let containers = [];
-                for (const sel of itemSelectors) {
-                    containers = Array.from(document.querySelectorAll(sel));
-                    if (containers.length > 20) break;  // 找到主要容器就停止
-                }
-
                 containers.forEach(el => {
-                    // 提取名称（优先 alt、title、textContent）
                     let name = '';
                     const img = el.querySelector('img');
                     if (img) {
-                        name = img.getAttribute('alt') || img.getAttribute('title') || '';
+                        name = (img.getAttribute('alt') || img.getAttribute('title') || '').trim();
                     }
                     if (!name) {
-                        const nameEl = el.querySelector('span[class*="name"], div[class*="name"], p, strong, [class*="text"]');
-                        if (nameEl) name = nameEl.textContent.trim();
+                        // 提取包含中文 | 或 (崭新出厂) 的文本
+                        const textElements = el.querySelectorAll('span, div, p, strong');
+                        for (const t of textElements) {
+                            const txt = t.textContent.trim();
+                            if (txt.includes('|') || (txt.includes('崭新') || txt.includes('磨损'))) {
+                                name = txt;
+                                break;
+                            }
+                        }
+                    }
+                    if (!name) {
+                        const fullText = el.textContent.trim();
+                        if (fullText.includes('|') && fullText.length > 10) {
+                            name = fullText.split('\n')[0] || fullText;
+                        }
                     }
 
                     // 提取数量
                     let count = 1;
-                    const countEl = el.querySelector('[class*="count"], [class*="num"], [class*="amount"], [class*="quantity"], .badge');
-                    if (countEl) {
-                        const txt = countEl.textContent.trim();
-                        const match = txt.match(/\\d+/);
-                        if (match) count = parseInt(match[0]);
+                    const countText = el.textContent;
+                    const countMatch = countText.match(/(\d+)\s*(?:个|x|×|件)/i) || countText.match(/\bx?(\d{1,4})\b/);
+                    if (countMatch) {
+                        count = parseInt(countMatch[1]);
                     }
 
-                    // 提取价格（如果有）
-                    let price = '';
-                    const priceEl = el.querySelector('[class*="price"], [class*="value"], [class*="rmb"], [class*="cny"], span[class*="¥"]');
-                    if (priceEl) {
-                        price = priceEl.textContent.trim();
-                    }
-
-                    // 过滤无效项
-                    if (name && name.length > 3 && 
+                    // 严格过滤：必须是饰品名称格式
+                    if (name && name.length > 8 && 
+                        (name.includes('|') || name.includes('崭新') || name.includes('磨损')) &&
                         !name.includes('加载') && 
                         !name.includes('推荐') && 
-                        !name.includes('广告') && 
-                        !/^\d+$/.test(name)) {   // 过滤纯数字
+                        !name.includes('广告') &&
+                        !name.includes('上一页') &&
+                        name.length < 120) {
                         result.push({
-                            name: name.trim(),
-                            count: count,
-                            price: price || 'N/A'
+                            name: name.trim().replace(/\s+/g, ' '),
+                            count: count
                         });
                     }
                 });
 
-                // 按名称去重并累加数量
+                // 去重 + 数量累加
                 const unique = {};
                 result.forEach(item => {
                     const key = item.name;
@@ -108,11 +105,11 @@ async def fetch_inventory():
                 return Object.values(unique);
             }''')
             
-            print(f"[{datetime.now()}] 最终抓取到 {len(items)} 件库存饰品")
-            if len(items) > 0:
-                print("前3个示例:", items[:3])
-            
-            return items
+            print(f"[{datetime.now()}] 最终成功抓取到 {len(items)} 件库存饰品")
+            if (items.length > 0) {
+                console.log("前 5 个示例：", items.slice(0, 5));
+            }
+            return items;
 
         except Exception as e:
             print(f"[{datetime.now()}] 抓取失败: {e}")
@@ -123,7 +120,7 @@ async def fetch_inventory():
         finally:
             await browser.close()
 
-# 以下函数保持不变（load_json, save_json, compare_data, send_bark, run_monitor, run_daily_report）
+# ==================== 以下函数无需修改 ====================
 def load_json(file_path):
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -163,8 +160,8 @@ def send_bark(title, body):
 def run_monitor():
     print(f"\n--- 监控任务 {datetime.now()} ---")
     current = asyncio.run(fetch_inventory())
-    if not current or len(current) < 5:  # 防止抓取失败时覆盖数据
-        print("抓取结果异常，跳过本次更新")
+    if not current or len(current) < 20:   # 提高阈值，防止抓取不完整时覆盖
+        print("抓取数量过少，跳过本次数据更新")
         return
     
     previous = load_json(DATA_FILE)
@@ -180,7 +177,7 @@ def run_monitor():
         timestamp = datetime.now().strftime("%H:%M")
         for c in changes:
             log.append(f"[{timestamp}] {c}")
-        save_json(CHANGES_LOG_FILE, log[-100:])  # 限制日志长度
+        save_json(CHANGES_LOG_FILE, log[-100:])
     else:
         print("无变动")
     
