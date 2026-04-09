@@ -23,7 +23,7 @@ jobs:
       - name: 安装依赖
         run: |
           pip install -r requirements.txt
-          playwright install chromium
+          playwright install chromium --with-deps
 
       - name: 运行监控任务（非报告时间）
         if: github.event.schedule != '0 4 * * *'
