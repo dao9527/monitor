@@ -2,9 +2,12 @@ name: Steam 库存监控
 
 on:
   schedule:
-    - cron: '*/10 * * * *'       # 每10分钟运行一次监控
-    - cron: '0 4 * * *'          # 每天 UTC 04:00 (北京时间12:00) 发送报告
+on:
+  schedule:
+    - cron: '0,10,20,30,40,50 * * * *'   # 每小时的第 0,10,20...分钟运行
+    - cron: '0 4 * * *'                   # 每天 UTC 04:00 (北京时间12:00) 发送报告
   workflow_dispatch:
+
 
 jobs:
   monitor:
