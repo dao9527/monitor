@@ -1,7 +1,6 @@
 name: Steam 库存监控
 
-on:
-  schedule:
+
 on:
   schedule:
     - cron: '0,10,20,30,40,50 * * * *'   # 每小时的第 0,10,20...分钟运行
